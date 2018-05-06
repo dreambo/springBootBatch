@@ -1,8 +1,9 @@
-package ch.javaee.springBootBatch;
+package ch.javaee.springbootbatch;
 
-import ch.javaee.springBootBatch.model.Person;
-import ch.javaee.springBootBatch.processor.PersonItemProcessor;
-import ch.javaee.springBootBatch.tokenizer.PersonFixedLengthTokenizer;
+import java.util.Properties;
+
+import javax.sql.DataSource;
+
 import org.springframework.batch.core.Job;
 import org.springframework.batch.core.Step;
 import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
@@ -12,10 +13,9 @@ import org.springframework.batch.core.launch.support.RunIdIncrementer;
 import org.springframework.batch.item.ItemProcessor;
 import org.springframework.batch.item.ItemReader;
 import org.springframework.batch.item.ItemWriter;
-import org.springframework.batch.item.database.JpaItemWriter;
-import org.springframework.batch.item.file.FlatFileItemReader;
 import org.springframework.batch.item.file.mapping.BeanWrapperFieldSetMapper;
 import org.springframework.batch.item.file.mapping.DefaultLineMapper;
+import org.springframework.batch.item.file.transform.LineTokenizer;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.context.annotation.Bean;
@@ -29,8 +29,13 @@ import org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean;
 import org.springframework.orm.jpa.vendor.Database;
 import org.springframework.orm.jpa.vendor.HibernateJpaVendorAdapter;
 
-import javax.sql.DataSource;
-import java.util.Properties;
+import ch.javaee.springbootbatch.model.Person;
+import ch.javaee.springbootbatch.processor.PersonItemProcessor;
+import ch.javaee.springbootbatch.reader.DBReader;
+import ch.javaee.springbootbatch.reader.FileReader;
+import ch.javaee.springbootbatch.tokenizer.PersonFixedLengthTokenizer;
+import ch.javaee.springbootbatch.writer.DBDeleter;
+import ch.javaee.springbootbatch.writer.DBWriter;
 
 
 @Configuration
@@ -45,13 +50,13 @@ public class BatchConfiguration {
     /*
         Load the properties
      */
-    @Value("${database.driver}")
+    @Value("${spring.datasource.driver}")
     private String databaseDriver;
-    @Value("${database.url}")
+    @Value("${spring.datasource.url}")
     private String databaseUrl;
-    @Value("${database.username}")
+    @Value("${spring.datasource.username}")
     private String databaseUsername;
-    @Value("${database.password}")
+    @Value("${spring.datasource.password}")
     private String databasePassword;
 
 
@@ -59,23 +64,29 @@ public class BatchConfiguration {
      * We define a bean that read each line of the input file.
      *
      * @return
+     * @throws Exception 
      */
     @Bean
-    public ItemReader<Person> reader() {
-        // we read a flat file that will be used to fill a Person object
-        FlatFileItemReader<Person> reader = new FlatFileItemReader<Person>();
-        // we pass as parameter the flat file directory
-        reader.setResource(new ClassPathResource("PersonData.txt"));
+    public ItemReader<Person> fileReader(DataSource dataSource) throws Exception {
+    	
         // we use a default line mapper to assign the content of each line to the Person object
-        reader.setLineMapper(new DefaultLineMapper<Person>() {{
-            // we use a custom fixed line tokenizer
-            setLineTokenizer(new PersonFixedLengthTokenizer());
-            // as field mapper we use the name of the fields in the Person class
-            setFieldSetMapper(new BeanWrapperFieldSetMapper<Person>() {{
-                // we create an object Person
-                setTargetType(Person.class);
-            }});
-        }});
+    	LineTokenizer lineTokenizer = new PersonFixedLengthTokenizer();
+        BeanWrapperFieldSetMapper<Person> fieldSetMapper = new BeanWrapperFieldSetMapper<Person>();
+        fieldSetMapper.setTargetType(Person.class);
+
+        DefaultLineMapper<Person> lineMapper = new DefaultLineMapper<Person>();
+        lineMapper.setLineTokenizer(lineTokenizer);
+        lineMapper.setFieldSetMapper(fieldSetMapper);
+    	FileReader reader = new FileReader(new ClassPathResource("PersonData.txt"), lineMapper);
+
+        return reader;
+    }
+
+    @Bean
+    public ItemReader<Person> dbReader(DataSource dataSource) throws Exception {
+    	
+    	DBReader reader = new DBReader(entityManagerFactory(dataSource).getObject());
+
         return reader;
     }
 
@@ -96,11 +107,19 @@ public class BatchConfiguration {
      * @return
      */
     @Bean
-    public ItemWriter<Person> writer() {
-        JpaItemWriter writer = new JpaItemWriter<Person>();
-        writer.setEntityManagerFactory(entityManagerFactory().getObject());
+    public ItemWriter<Person> writer(DataSource dataSource) {
+    	
+        return new DBWriter(entityManagerFactory(dataSource).getObject());
+    }
 
-        return writer;
+    /**
+     * Nothing special here a simple JpaItemWriter
+     * @return
+     */
+    @Bean
+    public ItemWriter<Person> deleter(DataSource dataSource) {
+    	
+        return new DBDeleter(entityManagerFactory(dataSource).getObject());
     }
 
     /**
@@ -111,11 +130,12 @@ public class BatchConfiguration {
      * @return
      */
     @Bean
-    public Job importPerson(JobBuilderFactory jobs, Step s1) {
+    public Job importPerson(JobBuilderFactory jobs, Step readStep, Step deleteStep) {
 
         return jobs.get("import")
                 .incrementer(new RunIdIncrementer()) // because a spring config bug, this incrementer is not really useful
-                .flow(s1)
+                .flow(readStep)
+                .next(deleteStep)
                 .end()
                 .build();
     }
@@ -131,15 +151,25 @@ public class BatchConfiguration {
      * @param processor
      * @return
      */
-
     @Bean
-    public Step step1(StepBuilderFactory stepBuilderFactory, ItemReader<Person> reader,
-                      ItemWriter<Person> writer, ItemProcessor<Person, Person> processor) {
-        return stepBuilderFactory.get("step1")
+    public Step readStep(StepBuilderFactory stepBuilderFactory, ItemReader<Person> fileReader, ItemWriter<Person> writer, ItemProcessor<Person, Person> processor) {
+
+    	return stepBuilderFactory.get("step1")
                 .<Person, Person>chunk(1000)
-                .reader(reader)
+                .reader(fileReader)
                 .processor(processor)
                 .writer(writer)
+                .build();
+    }
+
+    @Bean
+    public Step deleteStep(StepBuilderFactory stepBuilderFactory, ItemReader<Person> dbReader, ItemWriter<Person> deleter, ItemProcessor<Person, Person> processor) {
+
+    	return stepBuilderFactory.get("step2")
+                .<Person, Person>chunk(1000)
+                .reader(dbReader)
+                .processor(processor)
+                .writer(deleter)
                 .build();
     }
 
@@ -161,26 +191,24 @@ public class BatchConfiguration {
 
 
     @Bean
-    public LocalContainerEntityManagerFactoryBean entityManagerFactory() {
+    public LocalContainerEntityManagerFactoryBean entityManagerFactory(DataSource dataSource) {
 
-        LocalContainerEntityManagerFactoryBean lef = new LocalContainerEntityManagerFactoryBean();
-        lef.setPackagesToScan("ch.javaee.springBootBatch");
-        lef.setDataSource(dataSource());
-        lef.setJpaVendorAdapter(jpaVendorAdapter());
-        lef.setJpaProperties(new Properties());
-        return lef;
+        LocalContainerEntityManagerFactoryBean lemf = new LocalContainerEntityManagerFactoryBean();
+        lemf.setPackagesToScan("ch.javaee.springbootbatch");
+        lemf.setDataSource(dataSource);
+        lemf.setJpaVendorAdapter(jpaVendorAdapter());
+        lemf.setJpaProperties(new Properties());
+        return lemf;
     }
 
 
     @Bean
     public JpaVendorAdapter jpaVendorAdapter() {
         HibernateJpaVendorAdapter jpaVendorAdapter = new HibernateJpaVendorAdapter();
-        jpaVendorAdapter.setDatabase(Database.MYSQL);
+        jpaVendorAdapter.setDatabase(Database.POSTGRESQL);
         jpaVendorAdapter.setGenerateDdl(true);
         jpaVendorAdapter.setShowSql(false);
-
-        jpaVendorAdapter.setDatabasePlatform("org.hibernate.dialect.MySQLDialect");
+        jpaVendorAdapter.setDatabasePlatform(org.hibernate.dialect.PostgreSQL94Dialect.class.getName());
         return jpaVendorAdapter;
     }
-
 }

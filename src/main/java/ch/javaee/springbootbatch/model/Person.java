@@ -1,4 +1,4 @@
-package ch.javaee.springBootBatch.model;
+package ch.javaee.springbootbatch.model;
 
 import javax.persistence.Entity;
 import javax.persistence.GeneratedValue;
@@ -7,7 +7,8 @@ import javax.persistence.Id;
 
 @Entity
 public class Person {
-    @Id
+
+	@Id
     @GeneratedValue(strategy = GenerationType.AUTO)
     private Long id;
 

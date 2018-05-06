@@ -1,9 +1,8 @@
-
 .idea/*
-target/*
-
+target/
 *.class
-
 *.lst
-
 springBootBatch.iml
+.classpath
+.settings/
+bin/
